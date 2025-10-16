@@ -233,5 +233,5 @@ Issues and pull requests are welcome! Please avoid including real client data or
 ---
 
 ## 👤 Author
-**3N Consultoria Ambiental** — internal tool for license & compliance reminders.  
+**NV Dev** — internal tool for license & compliance reminders.  
 Suggestions and improvements are welcome!
