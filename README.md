@@ -220,12 +220,7 @@ Output: `dist/3N_Licencas.exe`.
 - Optional local **password encryption** (Fernet) if you ever allow saving app passwords.
 - HTML email templates.
 
----
-
-## 🤝 Contributing
-Issues and pull requests are welcome! Please avoid including real client data or secrets in any contribution.
-
----
+--- 
 
 ## 📄 License
 **MIT License** — simple and permissive. See the [LICENSE](LICENSE) file for details.
