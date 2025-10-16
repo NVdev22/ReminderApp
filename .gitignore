@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.cover
+.pytest_cache/
+dist/
+build/
+*.spec
+
+# Env files
+.env
+
+# App data (do not commit real data/secrets)
+Data/clientes.csv
+Data/config.json
+
+# IDE/editor
+.vscode/
+.idea/
+
