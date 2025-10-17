@@ -1,4 +1,4 @@
-# appScreens.py (desktop sem Render API, auto-push no GitHub)
+# appScreens.py (desktop sem Render API, auto-push no GitHub + ícone)
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -16,8 +16,12 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # --- Diretório base (compatível com PyInstaller) ---
-        if getattr(sys, "frozen", False):
+        # --- Diretórios base (compatível com PyInstaller) ---
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            # PyInstaller one-file extrai para _MEIPASS
+            self.base_dir = Path(sys._MEIPASS)
+        elif getattr(sys, "frozen", False):
+            # PyInstaller one-folder
             self.base_dir = Path(sys.executable).parent
         else:
             self.base_dir = Path(__file__).resolve().parent
@@ -27,13 +31,16 @@ class App(ctk.CTk):
         self.initialAppHeight = 630
         self.screenWidth = self.winfo_screenwidth()
         self.screenHeight = self.winfo_screenheight()
-        self.appTitle = {"menu":"3N Menu", "verClientes":"3N Clientes"}
+        self.appTitle = {"menu": "3N Menu", "verClientes": "3N Clientes"}
         self.appInitialPosX = int((self.screenWidth / 2) - (self.initialAppWidth / 2))
         self.appInitialPosY = int((self.screenHeight / 2) - (self.initialAppHeight / 2))
 
-        # Dados locais
-        self.data_dir = self.base_dir / "Data"
+        # Dados locais (AppData\3NApp\Data no Windows; ~/.3NApp/Data no restante)
+        appdata_root = Path(os.getenv("APPDATA", Path.home() / ".3NApp"))
+        self.data_dir = appdata_root / "3NApp" / "Data" if os.name == "nt" else appdata_root / "Data"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.data_file = self.data_dir / "clientes.csv"
+
         self.clients = []  # [{"empresa": str, "vencimento": str(YYYY-MM-DD)}]
 
         # Janela
@@ -43,6 +50,9 @@ class App(ctk.CTk):
         self.minsize(700, 420)
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
+
+        # Ícone da janela (usa APP_ICON ou tenta achar automaticamente)
+        self._set_window_icon()
 
         # Carregar DadApp.env ou .env (mesma pasta do exe/script)
         try:
@@ -61,6 +71,54 @@ class App(ctk.CTk):
         self.last_frame = None
         self.clients_frame = self.create_clients_view()
         self.show_menu()
+
+    # ---------- Ícone ----------
+    def _set_window_icon(self):
+        """
+        Define o ícone da janela:
+        - Se APP_ICON estiver definido, usa esse caminho.
+        - Caso contrário tenta: app.ico/icon.ico (Windows), ou app.png/icon.png (qualquer SO).
+        - Mantém referência em self._icon_ref para não ser coletado.
+        """
+        icon_env = (os.environ.get("APP_ICON") or "").strip()
+        candidates = []
+
+        if icon_env:
+            candidates.append(Path(icon_env))
+
+        # Tentativas padrão ao lado do executável/script
+        candidates += [
+            self.base_dir / "app.ico",
+            self.base_dir / "assets" / "app.ico",
+            self.base_dir / "icon.ico",
+            self.base_dir / "assets" / "icon.ico",
+            self.base_dir / "app.png",
+            self.base_dir / "assets" / "app.png",
+            self.base_dir / "icon.png",
+            self.base_dir / "assets" / "icon.png",
+        ]
+
+        for p in candidates:
+            try:
+                if not p.exists():
+                    continue
+                suffix = p.suffix.lower()
+                if suffix == ".ico":
+                    # .ico funciona bem no Windows
+                    if sys.platform.startswith("win"):
+                        self.iconbitmap(default=str(p))
+                        return
+                    # Em outros SOs, preferimos PNG via iconphoto
+                    continue
+                if suffix in {".png", ".gif"}:
+                    img = tk.PhotoImage(file=str(p))
+                    # manter referência
+                    self._icon_ref = img
+                    self.iconphoto(True, img)
+                    return
+            except Exception:
+                # Silencioso; só tenta o próximo
+                continue
 
     # ---------- UI ----------
     def create_menu(self):
@@ -84,12 +142,15 @@ class App(ctk.CTk):
         subtitle = ctk.CTkLabel(card, text="Gestão de Licenças", font=ctk.CTkFont(size=16))
         subtitle.grid(row=1, column=0, padx=30, pady=(0, 20))
 
-        # Apenas o botão Clientes (sem Render, sem GitHub manual)
-        ctk.CTkButton(card, width=280, height=46, corner_radius=10,
-                      text="Clientes", command=self.show_clients).grid(row=2, column=0, padx=30, pady=8)
+        ctk.CTkButton(
+            card, width=280, height=46, corner_radius=10,
+            text="Clientes", command=self.show_clients
+        ).grid(row=2, column=0, padx=30, pady=8)
 
-        ctk.CTkButton(card, width=140, height=34, corner_radius=8,
-                      text="Sair", command=self.destroy).grid(row=3, column=0, padx=30, pady=(0, 24))
+        ctk.CTkButton(
+            card, width=140, height=34, corner_radius=8,
+            text="Sair", command=self.destroy
+        ).grid(row=3, column=0, padx=30, pady=(0, 24))
         return frame
 
     def show_menu(self):
@@ -185,7 +246,10 @@ class App(ctk.CTk):
         ctk.CTkButton(controls, text="Exportar (Excel)", width=120, command=self.export_clients_excel).grid(row=0, column=7, padx=6, pady=6)
         ctk.CTkButton(controls, text="Recarregar", width=110, command=self.refresh_table).grid(row=0, column=8, padx=6, pady=6)
 
-        ctk.CTkLabel(frame, text="Legenda: Longe (verde), 30 dias (amarelo), 15 dias (laranja), Vencidas (vermelho)").grid(row=3, column=0, padx=12, pady=(0, 10), sticky='w')
+        ctk.CTkLabel(
+            frame,
+            text="Legenda: Longe (verde), 30 dias (amarelo), 15 dias (laranja), Vencidas (vermelho)"
+        ).grid(row=3, column=0, padx=12, pady=(0, 10), sticky='w')
         return frame
 
     # ---------- Dados ----------
@@ -220,11 +284,10 @@ class App(ctk.CTk):
             for c in self.clients:
                 writer.writerow([c["empresa"], self._format_date_display(c.get("vencimento", ""))])
 
-        # Auto-push GitHub (sempre)
+        # Auto-push GitHub
         try:
             self._push_github_internal(commit_message, silent=True)
         except Exception as e:
-            # Não bloqueia o uso; apenas avisa
             try:
                 messagebox.showwarning("GitHub", f"Salvo localmente, mas o envio ao GitHub falhou:\n{e}")
             except Exception:
@@ -244,8 +307,8 @@ class App(ctk.CTk):
         for idx, c in enumerate(sorted(self.clients, key=sort_key)):
             tag = self._row_tag_for_client(c)
             display_date = self._format_date_display(c.get("vencimento", ""))
-            tags = (('even' if idx % 2 == 0 else 'odd'),) if tag == 'normal' else (tag,)
-            self.tree.insert("", tk.END, values=(c.get("empresa",""), display_date), tags=tags)
+            tags = (('even' if idx % 2 == 0 else 'odd'),) if tag == 'normal' else (tag, )
+            self.tree.insert("", tk.END, values=(c.get("empresa", ""), display_date), tags=tags)
 
     def add_client(self):
         empresa = self.empresa_entry.get().strip()
@@ -390,13 +453,13 @@ class App(ctk.CTk):
             row_start = 4
 
             def sort_key(crow):
-                d = self._parse_date_any(crow.get('vencimento',''))
-                return (0, d) if d else (1, crow.get('empresa',''))
+                d = self._parse_date_any(crow.get('vencimento', ''))
+                return (0, d) if d else (1, crow.get('empresa', ''))
 
             sorted_rows = sorted(self.clients, key=sort_key)
             for i, cdata in enumerate(sorted_rows):
-                empresa = cdata.get('empresa','')
-                venc = self._format_date_display(cdata.get('vencimento',''))
+                empresa = cdata.get('empresa', '')
+                venc = self._format_date_display(cdata.get('vencimento', ''))
                 status = self._row_tag_for_client(cdata)
                 r = row_start + i
                 ws[f'A{r}'].value = empresa
@@ -406,7 +469,7 @@ class App(ctk.CTk):
                     cell = ws[f'{col}{r}']
                     cell.font = Font(size=14)
                     cell.border = border
-                    cell.alignment = Alignment(horizontal='left' if col=='A' else 'center', vertical='center')
+                    cell.alignment = Alignment(horizontal='left' if col == 'A' else 'center', vertical='center')
 
                 if status == 'expired':
                     fill = PatternFill('solid', fgColor='FFC7CE')
