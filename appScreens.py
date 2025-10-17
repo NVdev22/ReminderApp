@@ -1,4 +1,4 @@
-# appScreens.py (ou o arquivo do seu App)
+# appScreens.py (desktop sem Render API, auto-push no GitHub)
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -44,7 +44,7 @@ class App(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Carregar .env local (DadApp.env ou .env na mesma pasta do exe/script)
+        # Carregar DadApp.env ou .env (mesma pasta do exe/script)
         try:
             from dotenv import load_dotenv
             for p in (self.base_dir / "DadApp.env", self.base_dir / ".env"):
@@ -75,7 +75,7 @@ class App(ctk.CTk):
 
         card = ctk.CTkFrame(container, corner_radius=12)
         card.grid(row=0, column=0, padx=30, pady=30)
-        for i in range(7):
+        for i in range(5):
             card.grid_rowconfigure(i, weight=1)
         card.grid_columnconfigure(0, weight=1)
 
@@ -84,17 +84,12 @@ class App(ctk.CTk):
         subtitle = ctk.CTkLabel(card, text="Gestão de Licenças", font=ctk.CTkFont(size=16))
         subtitle.grid(row=1, column=0, padx=30, pady=(0, 20))
 
+        # Apenas o botão Clientes (sem Render, sem GitHub manual)
         ctk.CTkButton(card, width=280, height=46, corner_radius=10,
                       text="Clientes", command=self.show_clients).grid(row=2, column=0, padx=30, pady=8)
 
-        ctk.CTkButton(card, width=200, height=36, corner_radius=8,
-                      text="Sincronizar com servidor", command=self.sync_to_server).grid(row=3, column=0, padx=30, pady=(8, 8))
-
-        ctk.CTkButton(card, width=200, height=36, corner_radius=8,
-                      text="Enviar p/ GitHub", command=self.push_to_github).grid(row=4, column=0, padx=30, pady=(0, 16))
-
         ctk.CTkButton(card, width=140, height=34, corner_radius=8,
-                      text="Sair", command=self.destroy).grid(row=5, column=0, padx=30, pady=(0, 24))
+                      text="Sair", command=self.destroy).grid(row=3, column=0, padx=30, pady=(0, 24))
         return frame
 
     def show_menu(self):
@@ -127,8 +122,6 @@ class App(ctk.CTk):
         top.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(top, text="Clientes (Empresa / Vencimento)", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(top, width=120, height=30, corner_radius=6, text="Menu", command=self.show_menu).grid(row=0, column=1, padx=6)
-        ctk.CTkButton(top, width=140, height=30, corner_radius=6, text="Sincronizar", command=self.sync_to_server).grid(row=0, column=2, padx=6)
-        ctk.CTkButton(top, width=140, height=30, corner_radius=6, text="Enviar p/ GitHub", command=self.push_to_github).grid(row=0, column=3, padx=6)
 
         # Tabela
         table_frame = ctk.CTkFrame(frame)
@@ -191,7 +184,6 @@ class App(ctk.CTk):
         ctk.CTkButton(controls, text="Editar selecionado", width=150, command=self.edit_selected_client).grid(row=0, column=6, padx=6, pady=6)
         ctk.CTkButton(controls, text="Exportar (Excel)", width=120, command=self.export_clients_excel).grid(row=0, column=7, padx=6, pady=6)
         ctk.CTkButton(controls, text="Recarregar", width=110, command=self.refresh_table).grid(row=0, column=8, padx=6, pady=6)
-        ctk.CTkButton(controls, text="Enviar p/ GitHub", width=140, command=self.push_to_github).grid(row=0, column=9, padx=6, pady=6)
 
         ctk.CTkLabel(frame, text="Legenda: Longe (verde), 30 dias (amarelo), 15 dias (laranja), Vencidas (vermelho)").grid(row=3, column=0, padx=12, pady=(0, 10), sticky='w')
         return frame
@@ -221,18 +213,22 @@ class App(ctk.CTk):
             self._ensure_data_store()
 
     def _save_clients(self, commit_message="Update clientes.csv from desktop app"):
+        # Salva local
         with self.data_file.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["empresa", "vencimento"])
             for c in self.clients:
                 writer.writerow([c["empresa"], self._format_date_display(c.get("vencimento", ""))])
 
-        # Envio automático ao GitHub se habilitado
-        if (os.environ.get("GITHUB_PUSH_ON_SAVE") or "").strip() == "1":
+        # Auto-push GitHub (sempre)
+        try:
+            self._push_github_internal(commit_message, silent=True)
+        except Exception as e:
+            # Não bloqueia o uso; apenas avisa
             try:
-                self._push_github_internal(commit_message, silent=True)
+                messagebox.showwarning("GitHub", f"Salvo localmente, mas o envio ao GitHub falhou:\n{e}")
             except Exception:
-                pass
+                print("GitHub push falhou:", e)
 
     # ---------- Ações UI ----------
     def refresh_table(self):
@@ -491,54 +487,17 @@ class App(ctk.CTk):
             return 'due_month'
         return 'ok_far'
 
-    # ---------- Sincronização com Render (já existente) ----------
-    def sync_to_server(self):
-        url = (os.environ.get("RENDER_API_URL") or os.environ.get("RENDER_URL") or os.environ.get("API_URL") or "").strip()
-        token = (os.environ.get("RENDER_API_KEY") or os.environ.get("RENDER_API_TOKEN") or os.environ.get("API_KEY") or "").strip()
-        if not url:
-            messagebox.showwarning("Sincronizar", "Defina RENDER_API_URL no arquivo DadApp.env.")
-            return
-        payload = {
-            "clients": [
-                {
-                    "empresa": c.get("empresa", ""),
-                    "vencimento_iso": (self._parse_date_any(c.get("vencimento", "")) or datetime.today().date()).strftime("%Y-%m-%d") if c.get("vencimento") else "",
-                    "vencimento_br": self._format_date_display(c.get("vencimento", "")),
-                }
-                for c in self.clients
-            ],
-            "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
-            if 200 <= resp.status_code < 300:
-                messagebox.showinfo("Sincronizar", "Dados enviados com sucesso ao servidor.")
-            else:
-                messagebox.showerror("Sincronizar", f"Falha ao enviar: {resp.status_code} {resp.text[:200]}")
-        except Exception as e:
-            messagebox.showerror("Sincronizar", f"Erro de rede: {e}")
-
-    # ---------- Push para GitHub (sem git instalado) ----------
-    def push_to_github(self):
-        try:
-            self._push_github_internal("Sync clientes.csv from desktop app")
-            messagebox.showinfo("GitHub", "Arquivo enviado/atualizado com sucesso.")
-        except Exception as e:
-            messagebox.showerror("GitHub", f"Falha ao enviar: {e}")
-
+    # ---------- Push para GitHub (auto) ----------
     def _push_github_internal(self, commit_message: str, silent=False):
         repo = (os.environ.get("GITHUB_REPO") or "").strip()             # ex: NVdev22/3N-CLIENTES
-        token = (os.environ.get("GITHUB_TOKEN") or "").strip()           # Fine-grained token (repo:contents read/write)
+        token = (os.environ.get("GITHUB_TOKEN") or "").strip()           # Fine-grained token c/ contents: read/write
         file_path = (os.environ.get("GITHUB_FILE") or "clientes.csv").strip()
         branch = (os.environ.get("GITHUB_BRANCH") or "main").strip()
         committer_name = (os.environ.get("GITHUB_COMMITTER_NAME") or "3N Bot").strip()
         committer_email = (os.environ.get("GITHUB_COMMITTER_EMAIL") or "noreply@local").strip()
 
         if not repo or not token:
-            raise RuntimeError("Defina GITHUB_REPO e GITHUB_TOKEN no DadApp.env.")
+            raise RuntimeError("Defina GITHUB_REPO e GITHUB_TOKEN no DadApp.env (mesma pasta do app).")
 
         headers = {
             "Accept": "application/vnd.github+json",
