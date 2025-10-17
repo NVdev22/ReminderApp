@@ -1,26 +1,22 @@
 # notify.py
-# Summary:
-# - Fetches clientes.csv from GitHub (private or public)
-# - Falls back to Render Secret File (/etc/secrets/clientes.csv) or local Data/clientes.csv
-# - Sends a summary email via Gmail (App Password) for expired and upcoming expirations
+# Atualizado: versão segura para uso com repositório GitHub PRIVADO
+# ---------------------------------------------------------------
+# Lê o arquivo clientes.csv diretamente do GitHub usando variáveis
+# de ambiente para autenticação e executa a análise de vencimentos.
 #
-# Env vars required (set in Render Environment):
-#   SMTP_EMAIL, SMTP_APP_PASSWORD, OWNER_EMAIL
-# Optional:
-#   FROM_NAME (default: "3N Licenças")
-#   DAYS_THRESHOLDS (e.g., "30,15,5")
-#   GITHUB_REPO (e.g., "NVdev22/3N-CLIENTES")
-#   GITHUB_FILE (default: "clientes.csv")
-#   GITHUB_BRANCH (default: "main")
-#   GITHUB_TOKEN (required only if repo is PRIVATE)
+# Variáveis obrigatórias:
+#   GITHUB_REPO      -> Ex: "NVdev22/3N-CLIENTES"
+#   GITHUB_TOKEN     -> Token com "Contents: Read and write"
+#   SMTP_EMAIL       -> E-mail de envio (Gmail)
+#   SMTP_APP_PASSWORD-> Senha de app do Gmail
+#   OWNER_EMAIL      -> Destinatário
 #
-# CLI:
-#   python notify.py --dry-run        # list only
-#   python notify.py --only-expired   # send only expired
+# O arquivo 'clientes.csv' será obtido do branch principal
+# e nunca armazenado localmente nem impresso no terminal.
 
 import os
-import re
 import io
+import re
 import csv
 import ssl
 import base64
@@ -29,231 +25,144 @@ import argparse
 import requests
 from email.message import EmailMessage
 from datetime import datetime
-from pathlib import Path
 
-# ---------- Helpers: dates & parsing ----------
+# ---------- Helpers de data ----------
 
 def parse_date_any(s: str):
     if not s:
         return None
-    s = s.strip()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
         try:
-            return datetime.strptime(s, fmt).date()
+            return datetime.strptime(s.strip(), fmt).date()
         except Exception:
             continue
     return None
 
 def format_date_display(s: str):
     d = parse_date_any(s)
-    if d is None:
-        return s or ""
-    return d.strftime("%d/%m/%Y")
+    return d.strftime("%d/%m/%Y") if d else s or ""
 
-def valid_email(email: str):
-    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email or "") is not None
-
-def parse_thresholds(env_val: str, default_list=(30, 15, 5)):
-    if not env_val:
-        return list(default_list)
-    try:
-        vals = sorted({int(p.strip()) for p in env_val.split(",") if p.strip()})
-        return [v for v in vals if v >= 0] or list(default_list)
-    except Exception:
-        return list(default_list)
-
-# ---------- Sources for clientes.csv ----------
-
-SECRET_PATH = Path("/etc/secrets/clientes.csv")
-LOCAL_DATA_FILE = Path(__file__).resolve().parent / "Data" / "clientes.csv"
-
-def _sniff_csv(text: str):
-    """Return a reader for text handling comma or semicolon."""
-    sample = text[:2048]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;")
-        delim = dialect.delimiter
-    except Exception:
-        delim = "," if sample.count(",") >= sample.count(";") else ";"
-    return csv.DictReader(io.StringIO(text), delimiter=delim)
+# ---------- CSV ----------
 
 def load_clients_from_text(text: str):
-    """Parse CSV text into [{'empresa':..., 'vencimento':...}, ...]."""
-    out = []
-    reader = _sniff_csv(text)
-
-    # Normalize possible header variants
-    def pick(row, *keys):
-        for k in keys:
-            if k in row and row[k]:
-                return row[k]
-        return ""
-
+    """Converte CSV em lista de dicts."""
+    reader = csv.DictReader(io.StringIO(text))
+    clients = []
     for row in reader:
-        emp = (pick(row, "empresa", "company", "nome", "name") or "").strip()
-        ven = (pick(row, "vencimento", "due", "due_date", "data", "vence_em") or "").strip()
-        if not emp:
-            continue
-        out.append({"empresa": emp, "vencimento": ven})
-    return out
+        emp = (row.get("empresa") or "").strip()
+        ven = (row.get("vencimento") or "").strip()
+        if emp:
+            clients.append({"empresa": emp, "vencimento": ven})
+    return clients
+
+# ---------- GitHub fetch seguro ----------
 
 def load_clients_from_github():
     repo = os.environ.get("GITHUB_REPO", "").strip()
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
     file_path = os.environ.get("GITHUB_FILE", "clientes.csv").strip()
     branch = os.environ.get("GITHUB_BRANCH", "main").strip()
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
 
-    if not repo:
-        return None, "GITHUB_REPO not set"
+    if not repo or not token:
+        raise SystemExit("❌ Variáveis GITHUB_REPO e GITHUB_TOKEN obrigatórias.")
 
     url = f"https://api.github.com/repos/{repo}/contents/{file_path}?ref={branch}"
-    headers = {"Accept": "application/vnd.github+json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code == 200:
-            payload = r.json()
-            content = payload.get("content")
-            encoding = payload.get("encoding", "base64")
-            if content and encoding == "base64":
-                text = base64.b64decode(content).decode("utf-8-sig")
-                clients = load_clients_from_text(text)
-                return clients, f"github:{repo}/{file_path}@{branch}"
-            return None, f"unexpected GitHub content encoding: {encoding}"
-        elif r.status_code in (401, 403):
-            return None, "unauthorized (private repo? set GITHUB_TOKEN)"
-        elif r.status_code == 404:
-            return None, "not found (check GITHUB_FILE / branch)"
-        return None, f"GitHub HTTP {r.status_code}"
-    except Exception as e:
-        return None, f"GitHub fetch error: {e}"
-
-def load_clients_from_file(path: Path):
-    if not path.exists():
-        return None, f"file not found: {path}"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception:
-        # fallback to latin-1 if needed
-        text = path.read_text(encoding="latin-1")
-    clients = load_clients_from_text(text)
-    return clients, str(path)
-
-def load_clients():
-    """Try GitHub -> Secret File -> Local file."""
-    # 1) GitHub
-    clients, src = load_clients_from_github()
-    if clients is not None:
-        return clients, src
-
-    # 2) Render Secret File
-    clients, src2 = load_clients_from_file(SECRET_PATH)
-    if clients is not None:
-        return clients, src2
-
-    # 3) Local Data file
-    clients, src3 = load_clients_from_file(LOCAL_DATA_FILE)
-    if clients is not None:
-        return clients, src3
-
-    # None worked
-    return [], f"no source available (GitHub: {src}; SecretFile: {src2}; Local: {src3})"
-
-# ---------- Email + business logic ----------
-
-def build_config():
-    cfg = {
-        "smtp_email": os.environ.get("SMTP_EMAIL", "").strip(),
-        "app_password": os.environ.get("SMTP_APP_PASSWORD", "").strip(),
-        "owner_email": os.environ.get("OWNER_EMAIL", "").strip(),
-        "from_name": os.environ.get("FROM_NAME", "3N Licenças").strip(),
-        "thresholds": parse_thresholds(os.environ.get("DAYS_THRESHOLDS", "")),
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28"
     }
-    return cfg
 
-def select_due(clients, thresholds, only_expired=False):
-    today = datetime.today().date()
-    ths = set(int(x) for x in thresholds if isinstance(x, int))
-    selected = []
+    r = requests.get(url, headers=headers, timeout=20)
+    if r.status_code != 200:
+        raise SystemExit(f"❌ Falha ao obter CSV do GitHub: {r.status_code} {r.text[:150]}")
+
+    payload = r.json()
+    content = payload.get("content")
+    if not content:
+        raise SystemExit("❌ Nenhum conteúdo encontrado no clientes.csv")
+
+    text = base64.b64decode(content).decode("utf-8-sig")
+    clients = load_clients_from_text(text)
+    print(f"✅ {len(clients)} clientes carregados de {repo}/{file_path}")
+    return clients
+
+# ---------- Lógica de prazos ----------
+
+def selecionar_vencimentos(clients):
+    hoje = datetime.today().date()
+    expirados = []
+    proximos = []
     for c in clients:
         d = parse_date_any(c.get("vencimento"))
         if not d:
             continue
-        delta = (d - today).days
-        if only_expired:
-            if delta < 0:
-                selected.append((c, delta))
-        else:
-            if delta < 0 or delta in ths:
-                selected.append((c, delta))
-    return selected
+        delta = (d - hoje).days
+        if delta < 0:
+            expirados.append((c, delta))
+        elif delta <= 30:
+            proximos.append((c, delta))
+    return expirados, proximos
 
-def compose_email_lines(selected):
-    if not selected:
-        return ["Nenhuma licença vencida ou próxima do vencimento."]
-    lines = ["Empresas com atenção:"]
-    for c, delta in sorted(selected, key=lambda x: x[1]):
-        emp = c.get("empresa", "")
-        ven_str = format_date_display(c.get("vencimento", ""))
-        status = "vencida" if delta < 0 else f"vence em {delta} dia(s)"
-        lines.append(f"- {emp} | {ven_str} | {status}")
-    return lines
+# ---------- E-mail ----------
 
-def send_email(cfg, lines):
-    subject = "[3N] Resumo de licenças - vencidas e próximas"
-    body = "Olá,\n\n" + "\n".join(lines) + "\n\nAtenciosamente,\n" + cfg.get("from_name", "3N Licenças")
+def enviar_email(cfg, expirados, proximos):
+    linhas = []
+    if expirados:
+        linhas.append("⚠️ Licenças vencidas:")
+        for c, delta in expirados:
+            linhas.append(f"- {c['empresa']} (vencida há {-delta} dias, {format_date_display(c['vencimento'])})")
+        linhas.append("")
+    if proximos:
+        linhas.append("📅 Vencendo em até 30 dias:")
+        for c, delta in proximos:
+            linhas.append(f"- {c['empresa']} (vence em {delta} dias, {format_date_display(c['vencimento'])})")
+        linhas.append("")
+    if not linhas:
+        linhas.append("✅ Nenhuma licença vencida ou próxima do vencimento.")
 
-    owner = cfg.get("owner_email") or cfg.get("smtp_email")
-    if not valid_email(owner):
-        raise SystemExit("❌ OWNER_EMAIL inválido (ou defina SMTP_EMAIL).")
+    corpo = "\n".join(linhas)
+    msg = EmailMessage()
+    msg["Subject"] = "[3N] Resumo de Licenças - Vencimentos"
+    msg["From"] = f"{cfg['FROM_NAME']} <{cfg['SMTP_EMAIL']}>"
+    msg["To"] = cfg["OWNER_EMAIL"]
+    msg.set_content(corpo)
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(cfg["smtp_email"], cfg["app_password"])
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = f"{cfg.get('from_name','3N Licenças')} <{cfg['smtp_email']}>"
-        msg["To"] = owner
-        msg.set_content(body)
-        server.send_message(msg)
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as s:
+        s.login(cfg["SMTP_EMAIL"], cfg["SMTP_APP_PASSWORD"])
+        s.send_message(msg)
+    print("📨 E-mail enviado com sucesso!")
 
 # ---------- Main ----------
 
 def main():
-    parser = argparse.ArgumentParser(description="Enviar lembretes de vencimento (3N)")
-    parser.add_argument("--dry-run", action="store_true", help="Somente listar, sem enviar")
-    parser.add_argument("--only-expired", action="store_true", help="Enviar somente vencidos")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    cfg = build_config()
-    if not cfg["smtp_email"] or not cfg["app_password"]:
-        raise SystemExit("❌ Defina SMTP_EMAIL e SMTP_APP_PASSWORD.")
+    clients = load_clients_from_github()
+    expirados, proximos = selecionar_vencimentos(clients)
 
-    clients, source = load_clients()
-    if not clients:
-        print(f"⚠️  Nenhum cliente carregado ({source}).")
-        if args.dry_run:
-            return
-        # Envia mesmo assim avisando lista vazia
-        send_email(cfg, ["Nenhuma licença cadastrada."])
-        print("✅ Email enviado (lista vazia).")
-        return
-
-    selected = select_due(clients, cfg["thresholds"], only_expired=args.only_expired)
+    print(f"💾 {len(expirados)} vencidos | {len(proximos)} próximos")
 
     if args.dry_run:
-        print(f"Fonte dos dados: {source}")
-        print(f"Selecionados {len(selected)} empresas (dry-run):")
-        for c, delta in selected:
-            status = "vencida" if delta < 0 else f"vence em {delta} dia(s)"
+        for c, delta in expirados + proximos:
+            status = "vencida" if delta < 0 else f"vence em {delta} dias"
             print(f"- {c['empresa']}: {format_date_display(c['vencimento'])} ({status})")
         return
 
-    lines = compose_email_lines(selected)
-    send_email(cfg, lines)
-    print(f"✅ Resumo enviado com sucesso. Fonte dos dados: {source}")
+    cfg = {
+        "SMTP_EMAIL": os.environ.get("SMTP_EMAIL", ""),
+        "SMTP_APP_PASSWORD": os.environ.get("SMTP_APP_PASSWORD", ""),
+        "OWNER_EMAIL": os.environ.get("OWNER_EMAIL", ""),
+        "FROM_NAME": os.environ.get("FROM_NAME", "3N Licenças"),
+    }
+
+    if not all(cfg.values()):
+        raise SystemExit("❌ Configure SMTP_EMAIL, SMTP_APP_PASSWORD e OWNER_EMAIL nas variáveis de ambiente.")
+
+    enviar_email(cfg, expirados, proximos)
 
 if __name__ == "__main__":
     main()
