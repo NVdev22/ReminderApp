@@ -1,4 +1,4 @@
-# appScreens.py (desktop sem Render API, auto-push no GitHub + ícone)
+# appScreens.py (GitHub como banco central + ícone + ordem corrigida)
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -11,6 +11,7 @@ import base64
 from pathlib import Path
 from datetime import datetime
 import requests
+import io
 
 class App(ctk.CTk):
     def __init__(self):
@@ -18,10 +19,8 @@ class App(ctk.CTk):
 
         # --- Diretórios base (compatível com PyInstaller) ---
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            # PyInstaller one-file extrai para _MEIPASS
             self.base_dir = Path(sys._MEIPASS)
         elif getattr(sys, "frozen", False):
-            # PyInstaller one-folder
             self.base_dir = Path(sys.executable).parent
         else:
             self.base_dir = Path(__file__).resolve().parent
@@ -35,13 +34,12 @@ class App(ctk.CTk):
         self.appInitialPosX = int((self.screenWidth / 2) - (self.initialAppWidth / 2))
         self.appInitialPosY = int((self.screenHeight / 2) - (self.initialAppHeight / 2))
 
-        # Dados locais (AppData\3NApp\Data no Windows; ~/.3NApp/Data no restante)
+        # Estrutura de dados (sem CSV local como fonte de verdade)
         appdata_root = Path(os.getenv("APPDATA", Path.home() / ".3NApp"))
         self.data_dir = appdata_root / "3NApp" / "Data" if os.name == "nt" else appdata_root / "Data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.data_file = self.data_dir / "clientes.csv"
-
-        self.clients = []  # [{"empresa": str, "vencimento": str(YYYY-MM-DD)}]
+        self.data_file = self.data_dir / "clientes.csv"  # opcional, não usado como fonte
+        self.clients = []
 
         # Janela
         self.title(self.appTitle["menu"])
@@ -50,11 +48,9 @@ class App(ctk.CTk):
         self.minsize(700, 420)
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
-
-        # Ícone da janela (usa APP_ICON ou tenta achar automaticamente)
         self._set_window_icon()
 
-        # Carregar DadApp.env ou .env (mesma pasta do exe/script)
+        # Carregar .env
         try:
             from dotenv import load_dotenv
             for p in (self.base_dir / "DadApp.env", self.base_dir / ".env"):
@@ -63,30 +59,21 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-        self._ensure_data_store()
-        self._load_clients()
-
-        # Frames
+        # --- Cria UI antes de carregar dados (evita erro de métodos/TreeView inexistentes) ---
         self.menu_frame = self.create_menu()
         self.last_frame = None
         self.clients_frame = self.create_clients_view()
+
+        # Baixa dados do GitHub e mostra
+        self._load_clients()
         self.show_menu()
 
     # ---------- Ícone ----------
     def _set_window_icon(self):
-        """
-        Define o ícone da janela:
-        - Se APP_ICON estiver definido, usa esse caminho.
-        - Caso contrário tenta: app.ico/icon.ico (Windows), ou app.png/icon.png (qualquer SO).
-        - Mantém referência em self._icon_ref para não ser coletado.
-        """
         icon_env = (os.environ.get("APP_ICON") or "").strip()
         candidates = []
-
         if icon_env:
             candidates.append(Path(icon_env))
-
-        # Tentativas padrão ao lado do executável/script
         candidates += [
             self.base_dir / "app.ico",
             self.base_dir / "assets" / "app.ico",
@@ -97,45 +84,32 @@ class App(ctk.CTk):
             self.base_dir / "icon.png",
             self.base_dir / "assets" / "icon.png",
         ]
-
         for p in candidates:
             try:
                 if not p.exists():
                     continue
                 suffix = p.suffix.lower()
                 if suffix == ".ico":
-                    # .ico funciona bem no Windows
                     if sys.platform.startswith("win"):
                         self.iconbitmap(default=str(p))
                         return
-                    # Em outros SOs, preferimos PNG via iconphoto
                     continue
                 if suffix in {".png", ".gif"}:
                     img = tk.PhotoImage(file=str(p))
-                    # manter referência
-                    self._icon_ref = img
+                    self._icon_ref = img  # manter referência
                     self.iconphoto(True, img)
                     return
             except Exception:
-                # Silencioso; só tenta o próximo
                 continue
 
-    # ---------- UI ----------
+    # ---------- UI principal ----------
     def create_menu(self):
         frame = ctk.CTkFrame(self)
         frame.grid_rowconfigure(0, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
-        container = ctk.CTkFrame(frame)
-        container.grid(row=0, column=0, sticky="nsew")
-        container.grid_rowconfigure(0, weight=1)
-        container.grid_columnconfigure(0, weight=1)
-
-        card = ctk.CTkFrame(container, corner_radius=12)
-        card.grid(row=0, column=0, padx=30, pady=30)
-        for i in range(5):
-            card.grid_rowconfigure(i, weight=1)
-        card.grid_columnconfigure(0, weight=1)
+        card = ctk.CTkFrame(frame, corner_radius=12)
+        card.place(relx=0.5, rely=0.5, anchor="center")
 
         title = ctk.CTkLabel(card, text="3N", font=ctk.CTkFont(size=36, weight="bold"))
         title.grid(row=0, column=0, padx=30, pady=(30, 6))
@@ -172,19 +146,18 @@ class App(ctk.CTk):
         self.refresh_table()
         self.last_frame = self.clients_frame
 
+    # ---------- Tela de clientes ----------
     def create_clients_view(self):
         frame = ctk.CTkFrame(self)
         frame.grid_rowconfigure(1, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
-        # Top bar
         top = ctk.CTkFrame(frame)
         top.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         top.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(top, text="Clientes (Empresa / Vencimento)", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(top, width=120, height=30, corner_radius=6, text="Menu", command=self.show_menu).grid(row=0, column=1, padx=6)
 
-        # Tabela
         table_frame = ctk.CTkFrame(frame)
         table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         table_frame.grid_rowconfigure(0, weight=1)
@@ -222,11 +195,9 @@ class App(ctk.CTk):
         self.tree.tag_configure('due_15', background='#a85f00', foreground='#ffffff')
         self.tree.tag_configure('due_month', background='#b59f3b', foreground='#ffffff')
         self.tree.tag_configure('ok_far', background='#2f7a3d', foreground='#ffffff')
-        self.tree.tag_configure('normal', background='')
         self.tree.tag_configure('even', background='#1f1f1f')
         self.tree.tag_configure('odd', background='#262626')
 
-        # Controles
         controls = ctk.CTkFrame(frame)
         controls.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
         for i in range(10):
@@ -242,9 +213,10 @@ class App(ctk.CTk):
 
         ctk.CTkButton(controls, text="Adicionar", width=110, command=self.add_client).grid(row=0, column=4, padx=6, pady=6)
         ctk.CTkButton(controls, text="Remover selecionado", width=160, command=self.remove_selected_client).grid(row=0, column=5, padx=6, pady=6)
+        ctk.CTk.CTkButton if False else None  # proteção para linters antigos
         ctk.CTkButton(controls, text="Editar selecionado", width=150, command=self.edit_selected_client).grid(row=0, column=6, padx=6, pady=6)
         ctk.CTkButton(controls, text="Exportar (Excel)", width=120, command=self.export_clients_excel).grid(row=0, column=7, padx=6, pady=6)
-        ctk.CTkButton(controls, text="Recarregar", width=110, command=self.refresh_table).grid(row=0, column=8, padx=6, pady=6)
+        ctk.CTkButton(controls, text="Recarregar", width=110, command=self._load_clients).grid(row=0, column=8, padx=6, pady=6)
 
         ctk.CTkLabel(
             frame,
@@ -252,44 +224,42 @@ class App(ctk.CTk):
         ).grid(row=3, column=0, padx=12, pady=(0, 10), sticky='w')
         return frame
 
-    # ---------- Dados ----------
+    # ---------- Dados (GitHub remoto) ----------
     def _ensure_data_store(self):
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        if not self.data_file.exists():
-            with self.data_file.open("w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["empresa", "vencimento"])  # header
+        pass
 
     def _load_clients(self):
+        """Baixa clientes diretamente do GitHub."""
         self.clients = []
         try:
-            with self.data_file.open("r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    emp = (row.get("empresa") or "").strip()
-                    ven = (row.get("vencimento") or "").strip()
-                    if not emp:
-                        continue
+            data = self._fetch_github_csv()
+            if not data:
+                self.refresh_table()
+                return
+            reader = csv.DictReader(io.StringIO(data))
+            for row in reader:
+                emp = (row.get("empresa") or "").strip()
+                ven = (row.get("vencimento") or "").strip()
+                if emp:
                     d = self._parse_date_any(ven)
                     ven_iso = d.strftime("%Y-%m-%d") if d else ven
                     self.clients.append({"empresa": emp, "vencimento": ven_iso})
-        except FileNotFoundError:
-            self._ensure_data_store()
+            self.refresh_table()
+        except Exception as e:
+            messagebox.showwarning("GitHub", f"Falha ao carregar dados do GitHub:\n{e}")
 
     def _save_clients(self, commit_message="Update clientes.csv from desktop app"):
-        # Salva local
-        with self.data_file.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["empresa", "vencimento"])
-            for c in self.clients:
-                writer.writerow([c["empresa"], self._format_date_display(c.get("vencimento", ""))])
-
-        # Auto-push GitHub
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["empresa", "vencimento"])
+        for c in self.clients:
+            writer.writerow([c["empresa"], self._format_date_display(c.get("vencimento", ""))])
+        csv_data = output.getvalue().encode("utf-8")
         try:
-            self._push_github_internal(commit_message, silent=True)
+            self._push_github_internal(commit_message, content_bytes=csv_data, silent=True)
         except Exception as e:
             try:
-                messagebox.showwarning("GitHub", f"Salvo localmente, mas o envio ao GitHub falhou:\n{e}")
+                messagebox.showwarning("GitHub", f"Falha ao salvar no GitHub:\n{e}")
             except Exception:
                 print("GitHub push falhou:", e)
 
@@ -307,7 +277,7 @@ class App(ctk.CTk):
         for idx, c in enumerate(sorted(self.clients, key=sort_key)):
             tag = self._row_tag_for_client(c)
             display_date = self._format_date_display(c.get("vencimento", ""))
-            tags = (('even' if idx % 2 == 0 else 'odd'),) if tag == 'normal' else (tag, )
+            tags = (('even' if idx % 2 == 0 else 'odd'),) if tag == 'normal' else (tag,)
             self.tree.insert("", tk.END, values=(c.get("empresa", ""), display_date), tags=tags)
 
     def add_client(self):
@@ -408,7 +378,6 @@ class App(ctk.CTk):
         ctk.CTkButton(btn_row, text="Salvar", width=120, command=on_save).pack(side=tk.LEFT, padx=6)
         ctk.CTkButton(btn_row, text="Cancelar", width=120, command=dlg.destroy).pack(side=tk.LEFT, padx=6)
 
-    # ---------- Exportação ----------
     def export_clients_excel(self):
         if not self.clients:
             messagebox.showinfo("Exportar", "Não há dados para exportar.")
@@ -523,15 +492,11 @@ class App(ctk.CTk):
 
     def _to_iso_str(self, s):
         d = self._parse_date_any(s)
-        if d is None:
-            return ""
-        return d.strftime("%Y-%m-%d")
+        return d.strftime("%Y-%m-%d") if d else ""
 
     def _format_date_display(self, s):
         d = self._parse_date_any(s)
-        if d is None:
-            return s or ""
-        return d.strftime("%d/%m/%Y")
+        return d.strftime("%d/%m/%Y") if d else s or ""
 
     def _row_tag_for_client(self, c):
         ven = c.get("vencimento", "").strip()
@@ -550,10 +515,41 @@ class App(ctk.CTk):
             return 'due_month'
         return 'ok_far'
 
-    # ---------- Push para GitHub (auto) ----------
-    def _push_github_internal(self, commit_message: str, silent=False):
-        repo = (os.environ.get("GITHUB_REPO") or "").strip()             # ex: NVdev22/3N-CLIENTES
-        token = (os.environ.get("GITHUB_TOKEN") or "").strip()           # Fine-grained token c/ contents: read/write
+    # ---------- GitHub API ----------
+    def _fetch_github_csv(self):
+        """Faz download do CSV do GitHub e retorna o conteúdo em texto."""
+        repo = (os.environ.get("GITHUB_REPO") or "").strip()
+        token = (os.environ.get("GITHUB_TOKEN") or "").strip()
+        file_path = (os.environ.get("GITHUB_FILE") or "clientes.csv").strip()
+        branch = (os.environ.get("GITHUB_BRANCH") or "main").strip()
+
+        if not repo or not token:
+            raise RuntimeError("Defina GITHUB_REPO e GITHUB_TOKEN no DadApp.env.")
+
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28"
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/{file_path}?ref={branch}"
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 200:
+            js = r.json()
+            encoded = js.get("content", "")
+            if encoded:
+                return base64.b64decode(encoded).decode("utf-8")
+            return ""
+        elif r.status_code == 404:
+            # cria remoto vazio se não existir
+            empty_csv = "empresa,vencimento\n"
+            self._push_github_internal("Initialize remote clientes.csv", content_bytes=empty_csv.encode("utf-8"))
+            return empty_csv
+        else:
+            raise RuntimeError(f"Erro ao buscar CSV: {r.status_code} - {r.text[:200]}")
+
+    def _push_github_internal(self, commit_message: str, content_bytes=None, silent=False):
+        repo = (os.environ.get("GITHUB_REPO") or "").strip()
+        token = (os.environ.get("GITHUB_TOKEN") or "").strip()
         file_path = (os.environ.get("GITHUB_FILE") or "clientes.csv").strip()
         branch = (os.environ.get("GITHUB_BRANCH") or "main").strip()
         committer_name = (os.environ.get("GITHUB_COMMITTER_NAME") or "3N Bot").strip()
@@ -568,20 +564,14 @@ class App(ctk.CTk):
             "X-GitHub-Api-Version": "2022-11-28"
         }
 
-        # 1) Descobrir SHA atual (se existir)
+        # Descobre SHA atual (se existir) para update
         sha = None
         url_get = f"https://api.github.com/repos/{repo}/contents/{file_path}?ref={branch}"
         r = requests.get(url_get, headers=headers, timeout=20)
         if r.status_code == 200:
             sha = r.json().get("sha")
-        elif r.status_code not in (404,):
-            raise RuntimeError(f"GET {r.status_code}: {r.text[:200]}")
 
-        # 2) Codificar conteúdo local
-        content_bytes = self.data_file.read_bytes()
-        encoded = base64.b64encode(content_bytes).decode("ascii")
-
-        # 3) PUT (cria/atualiza)
+        encoded = base64.b64encode(content_bytes or b"").decode("ascii")
         url_put = f"https://api.github.com/repos/{repo}/contents/{file_path}"
         payload = {
             "message": commit_message,
